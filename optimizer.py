@@ -10,12 +10,12 @@
 @File URL: https://github.com/ppttzhu/MATH548_Project2
 """
 
-import numpy as np
 import math
 import scipy.optimize as optimize
 
-GAMMA = 1
-UTILITY_FUNCTION = 1  # 1:x, 2:log(x), 3:1 − exp(−γx), 4:x^γ/γ
+GAMMA3 = 1  # GAMMA3 > 0
+GAMMA4 = 0.5  # GAMMA4 < 1
+UTILITY_FUNCTION = 2  # 1:x, 2:log(x), 3:1 − exp(−γx), 4:x^γ/γ
 
 
 class PortfolioOptimizer:
@@ -38,7 +38,7 @@ class PortfolioOptimizer:
         self.p_up = p_up
         
         self.delta_t = 1        
-        self.q_up = self.rn_probability(self.u, self.d, self.r, self.delta_t)
+        self.q_up = (math.pow(1 + self.r, self.delta_t) - self.d) / (self.u - self.d)
         self.p_down = 1 - self.p_up
         self.q_down = 1 - self.q_up
 
@@ -93,8 +93,10 @@ class PortfolioOptimizer:
                 s_up = s_t_list[time_step + 1][2 * branch]
                 s_down = s_t_list[time_step + 1][2 * branch + 1]
                 v_t = v_list[time_step][branch]
-                h1 = optimize.minimize(self.utility_maximizer, 1, args=(v_t, s_t, s_up, s_down)).x[0]
-                h1_list_.append(h1)
+                mini = optimize.minimize(self.utility_maximizer, 1, args=(v_t, s_t, s_up, s_down))
+                if not mini.success:
+                    print("utility_maximizer failed.")
+                h1_list_.append(mini.x[0])
             h1_list.append(h1_list_)
             
             # Calculate v(t+1)
@@ -126,45 +128,142 @@ class PortfolioOptimizer:
         Martingale Method to find trading strategy
         :return: stock trading strategy and portfolio value tree: [h1, v]
         """
-        # Solve for Lagrange multiplier lambda
-        q_list = self.generate_probablity_tree(self.q_up, self.t)
-        p_list = self.generate_probablity_tree(self.p_up, self.t)
-        l_lambda = optimize.fsolve(self.lambda_solver, 1, args=(q_list, p_list))
-        print(l_lambda)
+        q_list = generate_probablity_tree(self.q_up, self.t)
+        p_list = generate_probablity_tree(self.p_up, self.t)
         
-#         return [h1_list, v_list]
+#         # Solve for Lagrange multiplier lambda
+#         root = optimize.root(self.lambda_solver, 1, args=(q_list, p_list))
+#         if not root.success:
+#             print("lambda_solver failed.")
+#         l_lambda = root.x[0]
+#         print(l_lambda)
+#          
+#         # Solve for optimal attainable wealth at maturity 
+#         w_list = []
+#         for branch in range(self.t + 1):
+#             b_t = math.pow(1 + self.r, self.t)
+#             w = utility_function_prime_inverse(l_lambda * q_list[branch] / p_list[branch] / b_t)
+#             w = utility_function_prime_inverse(l_lambda * q_list[branch] / p_list[branch] / b_t)
+#             w_list.append(w)
+        
+        # Calculate optimal attainable wealth by analytic solution
+        w_list = self.w_analytic_solution(q_list, p_list)
+         
+        # Solve for optimal attainable wealth and trading strategy at each time
+        s_t_list = self.build_stock_tree_combine()
+        h1_list = []
+        v_list = [w_list]
+        for time_step in range(self.t, 0, -1):
+            v_list_ = []
+            h1_list_ = []
+            for branch in range(time_step):
+                # Solve for trading strategy
+                s = [s_t_list[time_step][branch], s_t_list[time_step][branch + 1]]
+                x = [v_list[0][branch], v_list[0][branch + 1]]
+                h0h1 = binomial_tree_hedging(s, x, self.r, time_step)
+                # Solve for attainable wealth at t-1
+                mma_part = h0h1[0] * math.pow(1 + self.r, time_step - 1)
+                stock_part = h0h1[1] * s_t_list[time_step - 1][branch]
+                v = mma_part + stock_part
+                h = stock_part / v
+                v_list_.append(v)
+                h1_list_.append(h)
+            v_list.insert(0, v_list_) 
+            h1_list.insert(0, h1_list_) 
+                            
+        return [h1_list, v_list]
     
     def lambda_solver(self, l_lambda: float, q_list: list, p_list: list) -> float:
+        """
+        Calculate Lagrange multiplier lambda by iteration/solver
+        """
         expect = 0
         b_t = math.pow(1 + self.r, self.t)
+        if l_lambda < 0 and UTILITY_FUNCTION == 3:  # set constraints for solver (lambda > 0)
+            l_lambda = abs(l_lambda) + 100
         for i in range(len(q_list)):
             expect += utility_function_prime_inverse(l_lambda * q_list[i] / p_list[i] / b_t) / b_t * q_list[i]
         return expect - self.v_0
-
-    def generate_probablity_tree(self, p_up: float, step: int) -> float:
-        tree = []
-        for i in range(step + 1):
-            p = math.pow(p_up, i) * math.pow(1 - p_up, step - i) * yang_hui_triangle(i , step)
-            tree.append(p)
-        return tree
-
-    # Supporting static functions
-
-    @staticmethod
-    def rn_probability(up: float, down: float, r: float, delta_t: float) -> list:
+    
+    def w_analytic_solution(self, q_list: list, p_list: list) -> list:
         """
-        calculate risk neutual probability
-        :param up: calibrated up range
-        :param down: calibrated down range
-        :param r: risk free rate (annual rate, expressed in terms of compounding)
-        :param delta_t: time interval of one branch (expressed in years)
-        :return: up probability
+        Calculate optimal attainable wealth by analytic solution
         """
+        if UTILITY_FUNCTION == 2:
+            return self.w_analytic_solution2(q_list, p_list)
+        elif UTILITY_FUNCTION == 3:
+            if GAMMA3 <= 0:
+                print("GAMMA of utility function3 should be positive.")
+            return self.w_analytic_solution3(q_list, p_list, GAMMA3)
+        elif UTILITY_FUNCTION == 4:
+            if GAMMA4 >= 1:
+                print("GAMMA of utility function4 should be smaller than 1.")
+            return self.w_analytic_solution4(q_list, p_list, GAMMA4)
+        else:
+            print("Unsupported utility function.")
+            return -1
 
-        # risk neutral probability
-        q_up = (math.pow(1 + r, delta_t) - down) / (up - down)
+    def w_analytic_solution2(self, q_list: list, p_list: list) -> float:
+        """
+        u(x) = log(x)
+        """
+        w_list = []
+        b_t = math.pow(1 + self.r, self.t)
+        for i in range(len(p_list)):
+            l = q_list[i] / p_list[i]
+            w_list.append(b_t / l * self.v_0)
+        return w_list
 
-        return q_up
+    def w_analytic_solution3(self, q_list: list, p_list: list, gamma: float) -> list:
+        """
+        u(x) = 1 − exp(−γx), γ > 0
+        """
+        e1 = 0
+        e2 = 0
+        b_t = math.pow(1 + self.r, self.t)
+        for i in range(len(p_list)):
+            l = q_list[i] / p_list[i]
+            e1 += p_list[i] * (l / b_t * math.log(l / b_t / gamma))
+            e2 += p_list[i] * (l / b_t)
+        w_list = []
+        for i in range(len(p_list)):
+            l = q_list[i] / p_list[i]
+            w_list_ = ((self.v_0 * gamma + e1) / e2 - math.log(l / b_t / gamma)) / gamma 
+            w_list.append(w_list_)
+        return w_list
+
+    def w_analytic_solution4(self, q_list: list, p_list: list, gamma: float) -> list:
+        """
+        u(x) = x^γ/γ, γ < 1
+        """
+        e = 0
+        b_t = math.pow(1 + self.r, self.t)
+        for i in range(len(p_list)):
+            l = q_list[i] / p_list[i]
+            e += p_list[i] * math.pow(l / b_t, -gamma / (1 - gamma))
+        w_list = []
+        for i in range(len(p_list)):
+            l = q_list[i] / p_list[i]
+            w_list_ = self.v_0 * math.pow(l / b_t, -1 / (1 - gamma)) / e
+            w_list.append(w_list_)
+        return w_list
+
+
+def binomial_tree_hedging(s: list, x: list, r: float, t: float) -> list:
+    """
+    binomial tree support function to calculate hedging ratio on each node
+    :param s: list of spot price of the underlying asset. Length 2, upward and downward side.
+    :param x: list of value of the contingent claim. Length 2, upward and downward side.
+    :param r: risk free rate (annual rate, expressed in terms of compounding)
+    :param t: time of latter time step
+    :return: list of hedging strategy of the contingent claim. Length 2, (H0, H1)
+    """
+    h1 = (x[1] - x[0]) / (s[1] - s[0])
+    h0 = (x[1] - s[1] * h1) / math.pow(1 + r, t)
+
+    hedging = [h0, h1]
+
+    return hedging
 
 
 def utility_function(x: float) -> float:
@@ -176,9 +275,13 @@ def utility_function(x: float) -> float:
     elif UTILITY_FUNCTION == 2:
         return utility_function2(x)
     elif UTILITY_FUNCTION == 3:
-        return utility_function3(x, GAMMA)
+        if GAMMA3 <= 0:
+            print("GAMMA of utility function3 should be positive.")
+        return utility_function3(x, GAMMA3)
     elif UTILITY_FUNCTION == 4:
-        return utility_function4(x, GAMMA)
+        if GAMMA4 >= 1:
+            print("GAMMA of utility function4 should be smaller than 1.")
+        return utility_function4(x, GAMMA4)
     else:
         print("Unsupported utility function.")
         return -1
@@ -191,13 +294,17 @@ def utility_function_prime_inverse(x: float) -> float:
     if UTILITY_FUNCTION == 2:
         return utility_function_prime_inverse2(x)
     elif UTILITY_FUNCTION == 3:
-        return utility_function_prime_inverse3(x, GAMMA)
+        if GAMMA3 <= 0:
+            print("GAMMA of utility function3 should be positive.")
+        return utility_function_prime_inverse3(x, GAMMA3)
     elif UTILITY_FUNCTION == 4:
-        return utility_function_prime_inverse4(x, GAMMA)
+        if GAMMA4 >= 1:
+            print("GAMMA of utility function4 should be smaller than 1.")
+        return utility_function_prime_inverse4(x, GAMMA4)
     else:
         print("Unsupported utility function.")
         return -1
-
+    
 
 def utility_function1(x: float) -> float:
     """
@@ -222,30 +329,30 @@ def utility_function_prime_inverse2(y: float) -> float:
 
 def utility_function3(x: float, gamma: float) -> float:
     """
-    u(x) = 1 − exp(−γx)
+    u(x) = 1 − exp(−γx), γ > 0
     """
     return 1 - math.exp(-gamma * x)
 
 
 def utility_function_prime_inverse3(y: float, gamma: float) -> float:
     """
-    u(x) = 1 − exp(−γx)
+    u(x) = 1 − exp(−γx), γ > 0
     """
     return -math.log(y / gamma) / gamma
 
 
 def utility_function4(x: float, gamma: float) -> float:
     """
-    u(x) = x^γ/γ
+    u(x) = x^γ/γ, γ < 1
     """
     return math.pow(x, gamma) / gamma
 
 
 def utility_function_prime_inverse4(y: float, gamma: float) -> float:
     """
-    u(x) = x^γ/γ
+    u(x) = x^γ/γ, γ < 1
     """
-    return math.pow(gamma * y, 1 / gamma)
+    return math.pow(y, 1 / (gamma - 1))
 
 
 def yang_hui_triangle(n: int, k: int) -> int:
@@ -273,3 +380,11 @@ def yang_hui_triangle(n: int, k: int) -> int:
                 list1.append(list0[j - 1] + list0[j])
 
     return list1[n]
+
+
+def generate_probablity_tree(p_up: float, step: int) -> float:
+    tree = []
+    for i in range(step + 1):
+        p = math.pow(p_up, step - i) * math.pow(1 - p_up, i) * yang_hui_triangle(i , step)
+        tree.append(p)
+    return tree
